@@ -3,10 +3,57 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3847;
 const DATA_FILE = path.join(__dirname, 'data', 'rsvps.json');
+const ADMIN_KEY = process.env.ADMIN_KEY || '';
+const MAX_RSVPS = 200;
 
-app.use(express.json());
+// ── Security headers ─────────────────────────────────────────
+
+app.use((_req, res, next) => {
+  res.set({
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'X-XSS-Protection': '0',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    'Content-Security-Policy': "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
+  });
+  next();
+});
+
+app.use(express.json({ limit: '1kb' }));
+
+// ── Rate limiting (in-memory, per IP) ────────────────────────
+
+const rateMap = new Map();
+const RATE_WINDOW = 60_000;   // 1 minute
+const RATE_MAX = 10;          // max 10 RSVP requests per minute per IP
+
+function rateLimit(req, res, next) {
+  const ip = req.ip;
+  const now = Date.now();
+  const entry = rateMap.get(ip);
+
+  if (!entry || now - entry.start > RATE_WINDOW) {
+    rateMap.set(ip, { start: now, count: 1 });
+    return next();
+  }
+
+  entry.count++;
+  if (entry.count > RATE_MAX) {
+    return res.status(429).json({ error: 'Too many requests' });
+  }
+  next();
+}
+
+// Cleanup stale entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of rateMap) {
+    if (now - entry.start > RATE_WINDOW) rateMap.delete(ip);
+  }
+}, 300_000);
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -58,7 +105,7 @@ function generateICS() {
 // ── Routes ───────────────────────────────────────────────────
 
 // RSVP API
-app.post('/api/rsvp', (req, res) => {
+app.post('/api/rsvp', rateLimit, (req, res) => {
   const { slug, attending } = req.body;
   if (!slug || typeof slug !== 'string' || slug.length > 100) {
     return res.status(400).json({ error: 'Invalid slug' });
@@ -67,6 +114,12 @@ app.post('/api/rsvp', (req, res) => {
   if (!sanitizedSlug) return res.status(400).json({ error: 'Invalid slug' });
 
   const rsvps = readRsvps();
+
+  // Prevent spam: cap total unique slugs
+  if (!rsvps[sanitizedSlug] && Object.keys(rsvps).length >= MAX_RSVPS) {
+    return res.status(429).json({ error: 'Too many RSVPs' });
+  }
+
   rsvps[sanitizedSlug] = {
     attending: !!attending,
     updatedAt: new Date().toISOString(),
@@ -92,8 +145,11 @@ app.get('/api/calendar', (_req, res) => {
   res.send(ics);
 });
 
-// Admin: ver RSVPs
-app.get('/admin/rsvps', (_req, res) => {
+// Admin: ver RSVPs (protected by ADMIN_KEY env var)
+app.get('/admin/rsvps', (req, res) => {
+  if (ADMIN_KEY && req.query.key !== ADMIN_KEY) {
+    return res.status(401).send('Unauthorized');
+  }
   const rsvps = readRsvps();
   const entries = Object.entries(rsvps)
     .map(([slug, data]) => ({ slug, ...data }))
