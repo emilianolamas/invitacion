@@ -24,6 +24,18 @@ app.use((_req, res, next) => {
 
 app.use(express.json({ limit: '1kb' }));
 
+// ── Cookie parser (no dependencies) ──────────────────────────
+
+function parseCookies(req) {
+  const header = req.headers.cookie || '';
+  const cookies = {};
+  header.split(';').forEach(pair => {
+    const [name, ...rest] = pair.trim().split('=');
+    if (name) cookies[name.trim()] = decodeURIComponent(rest.join('=').trim());
+  });
+  return cookies;
+}
+
 // ── Rate limiting (in-memory, per IP) ────────────────────────
 
 const rateMap = new Map();
@@ -113,6 +125,13 @@ app.post('/api/rsvp', rateLimit, (req, res) => {
   const sanitizedSlug = slug.replace(/[^a-zA-Z0-9_-]/g, '');
   if (!sanitizedSlug) return res.status(400).json({ error: 'Invalid slug' });
 
+  // Device lock: check cookie
+  const cookies = parseCookies(req);
+  const lockedSlug = cookies.rsvp_slug;
+  if (lockedSlug && lockedSlug !== sanitizedSlug) {
+    return res.status(403).json({ error: 'locked', lockedTo: lockedSlug });
+  }
+
   const rsvps = readRsvps();
 
   // Prevent spam: cap total unique slugs
@@ -125,14 +144,23 @@ app.post('/api/rsvp', rateLimit, (req, res) => {
     updatedAt: new Date().toISOString(),
   };
   writeRsvps(rsvps);
+
+  // Lock device to this slug (cookie expires in 30 days)
+  res.set('Set-Cookie', 'rsvp_slug=' + sanitizedSlug + '; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000');
   res.json({ ok: true, attending: !!attending });
 });
 
 app.get('/api/rsvp/:slug', (req, res) => {
   const sanitizedSlug = req.params.slug.replace(/[^a-zA-Z0-9_-]/g, '');
+  const cookies = parseCookies(req);
+  const lockedSlug = cookies.rsvp_slug;
   const rsvps = readRsvps();
   const entry = rsvps[sanitizedSlug];
-  res.json({ attending: entry ? entry.attending : null });
+  res.json({
+    attending: entry ? entry.attending : null,
+    locked: !!(lockedSlug && lockedSlug !== sanitizedSlug),
+    lockedTo: (lockedSlug && lockedSlug !== sanitizedSlug) ? lockedSlug : null,
+  });
 });
 
 // Calendar download
@@ -628,6 +656,17 @@ let currentState = null;        // null | true | false
 fetch('/api/rsvp/' + SLUG)
   .then(r => r.json())
   .then(d => {
+    if (d.locked) {
+      // Device already confirmed for a different person
+      btnConfirm.disabled = true;
+      btnDecline.disabled = true;
+      btnConfirm.innerHTML = '<span>🔒</span> <span>Ya confirmaste desde otro link</span>';
+      btnConfirm.style.opacity = '0.5';
+      btnConfirm.style.cursor = 'not-allowed';
+      btnDecline.style.display = 'none';
+      showStatus('Este dispositivo ya fue usado para confirmar con otro link', 'red');
+      return;
+    }
     if (d.attending !== null) {
       currentState = d.attending;
       updateButtons();
@@ -644,14 +683,21 @@ function rsvp(attending) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ slug: SLUG, attending }),
   })
-    .then(r => r.json())
-    .then(d => {
-      if (d.ok) {
-        currentState = d.attending;
-        updateButtons();
-        showStatus(d.attending ? '¡Genial, te esperamos! 🎉' : 'Una pena, te vamos a extrañar 💔',
-                   d.attending ? 'green' : 'red');
+    .then(r => {
+      if (r.status === 403) {
+        return r.json().then(d => {
+          showStatus('Este dispositivo ya confirmó con otro link (' + d.lockedTo + ')', 'red');
+          return null;
+        });
       }
+      return r.json();
+    })
+    .then(d => {
+      if (!d || !d.ok) return;
+      currentState = d.attending;
+      updateButtons();
+      showStatus(d.attending ? '¡Genial, te esperamos! 🎉' : 'Una pena, te vamos a extrañar 💔',
+                 d.attending ? 'green' : 'red');
     })
     .catch(() => showStatus('Error al confirmar, intentá de nuevo', 'red'));
 }
