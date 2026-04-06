@@ -8,6 +8,18 @@ const PORT = process.env.PORT || 3847;
 const DATA_FILE = path.join(__dirname, 'data', 'rsvps.json');
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
 const MAX_RSVPS = 200;
+const GUESTS_FILE = path.join(__dirname, 'data', 'guests.json');
+
+// ── Guest list (loaded from data/guests.json) ─────────────────────
+
+let GUESTS = {};
+try {
+  GUESTS = JSON.parse(fs.readFileSync(GUESTS_FILE, 'utf8'));
+  console.log('Loaded ' + Object.keys(GUESTS).length + ' guests from data/guests.json');
+} catch (err) {
+  console.error('WARNING: Could not load data/guests.json — no guest validation active.');
+  console.error('  Create it with: { "slug": "Nombre" } pairs.');
+}
 
 // ── Security headers ─────────────────────────────────────────
 
@@ -35,6 +47,10 @@ function parseCookies(req) {
   });
   return cookies;
 }
+
+// ── Static files ──────────────────────────────────────────
+
+app.use(express.static(path.join(__dirname, 'public'), { maxAge: '7d' }));
 
 // ── Rate limiting (in-memory, per IP) ────────────────────────
 
@@ -122,8 +138,10 @@ app.post('/api/rsvp', rateLimit, (req, res) => {
   if (!slug || typeof slug !== 'string' || slug.length > 100) {
     return res.status(400).json({ error: 'Invalid slug' });
   }
-  const sanitizedSlug = slug.replace(/[^a-zA-Z0-9_-]/g, '');
-  if (!sanitizedSlug) return res.status(400).json({ error: 'Invalid slug' });
+  const sanitizedSlug = slug.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase();
+  if (!sanitizedSlug || !GUESTS[sanitizedSlug]) {
+    return res.status(404).json({ error: 'Invalid guest' });
+  }
 
   // Device lock: check cookie
   const cookies = parseCookies(req);
@@ -151,7 +169,8 @@ app.post('/api/rsvp', rateLimit, (req, res) => {
 });
 
 app.get('/api/rsvp/:slug', (req, res) => {
-  const sanitizedSlug = req.params.slug.replace(/[^a-zA-Z0-9_-]/g, '');
+  const sanitizedSlug = req.params.slug.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase();
+  if (!GUESTS[sanitizedSlug]) return res.status(404).json({ error: 'Invalid guest' });
   const cookies = parseCookies(req);
   const lockedSlug = cookies.rsvp_slug;
   const rsvps = readRsvps();
@@ -201,9 +220,9 @@ app.get('/admin/rsvps', (req, res) => {
 </style></head><body>
 <h1>RSVPs</h1>
 <h2>✅ Confirmados <span class="count">(${confirmed.length})</span></h2>
-<ul>${confirmed.map(e => `<li><span class="slug">${escapeHtml(e.slug)}</span><span class="date">${e.updatedAt}</span></li>`).join('')}</ul>
+<ul>${confirmed.map(e => `<li><span class="slug">${escapeHtml(GUESTS[e.slug] || e.slug)}</span><span class="date">${e.updatedAt}</span></li>`).join('')}</ul>
 <h2>❌ Declinaron <span class="count">(${declined.length})</span></h2>
-<ul>${declined.map(e => `<li><span class="slug">${escapeHtml(e.slug)}</span><span class="date">${e.updatedAt}</span></li>`).join('')}</ul>
+<ul>${declined.map(e => `<li><span class="slug">${escapeHtml(GUESTS[e.slug] || e.slug)}</span><span class="date">${e.updatedAt}</span></li>`).join('')}</ul>
 </body></html>`);
 });
 
@@ -213,16 +232,20 @@ function escapeHtml(str) {
 
 // ── Main invitation page ─────────────────────────────────────
 
-app.get('/invitacion/:slug', (req, res) => {
-  const slug = req.params.slug.replace(/[^a-zA-Z0-9_-]/g, '');
-  if (!slug) return res.status(404).send('Not found');
-  res.send(renderPage(slug));
+app.get('/:slug', (req, res) => {
+  const slug = req.params.slug.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase();
+  if (!slug || !GUESTS[slug]) return res.status(404).send('Not found');
+  res.send(renderPage(slug, GUESTS[slug]));
 });
 
-// Redirect root
-app.get('/', (_req, res) => res.redirect('/invitacion/amigo'));
+// Root — show page without RSVP ability
+app.get('/', (_req, res) => {
+  res.send(renderPage(null, null));
+});
 
-function renderPage(slug) {
+function renderPage(slug, guestName) {
+  const isGuest = !!(slug && guestName);
+  const safeGuestName = isGuest ? escapeHtml(guestName.split(' ')[0]) : '';
   return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -230,6 +253,15 @@ function renderPage(slug) {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>¡Estás invitado/a! — Cumple de Emiliano</title>
 <meta name="description" content="Invitación al cumpleaños de Emiliano Lamas — 11 de abril 2026">
+<meta property="og:title" content="Cumple de Emiliano 🎉">
+<meta property="og:description" content="Cenita chill, con música, tragos y juegos de mesa — Sábado 11 de abril, 21 hs">
+<meta property="og:image" content="/thumbnail.webp">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;600;700&display=swap" rel="stylesheet">
@@ -567,7 +599,7 @@ canvas#confetti {
   <div class="hero">
     <span class="emoji-top">🎂</span>
     <h1>Cumple de<br>Emiliano</h1>
-    <p class="subtitle">¡Estás invitado/a!</p>
+    <p class="subtitle">${isGuest ? `¡${safeGuestName}, estás invitado/a!` : '¡Estás invitado/a!'}</p>
   </div>
 
   <!-- Details card -->
@@ -627,13 +659,13 @@ canvas#confetti {
 
   <!-- Actions -->
   <div class="actions">
-    <button class="btn btn-confirm" id="btnConfirm" onclick="rsvp(true)">
+${isGuest ? `    <button class="btn btn-confirm" id="btnConfirm" onclick="rsvp(true)">
       <span>✅</span> <span>Confirmar asistencia</span>
     </button>
     <button class="btn btn-decline" id="btnDecline" onclick="rsvp(false)">
       <span>No puedo ir 😢</span>
     </button>
-    <p class="status-msg" id="statusMsg"></p>
+    <p class="status-msg" id="statusMsg"></p>` : `    <p class="status-msg" style="color: var(--text-muted);">Para confirmar asistencia, usá tu link personal</p>`}
     <a class="btn btn-calendar" href="/api/calendar" download="cumple-emiliano.ics">
       <span>📆</span> <span>Añadir al calendario</span>
     </a>
@@ -646,11 +678,13 @@ canvas#confetti {
 <script>
 // ── RSVP Logic ───────────────────────────────────────────────
 
-const SLUG = '${slug}';
+const SLUG = ${isGuest ? "'" + slug + "'" : 'null'};
 const btnConfirm = document.getElementById('btnConfirm');
 const btnDecline = document.getElementById('btnDecline');
 const statusMsg = document.getElementById('statusMsg');
-let currentState = null;        // null | true | false
+let currentState = null;
+
+if (SLUG && btnConfirm) {
 
 // Load saved state
 fetch('/api/rsvp/' + SLUG)
@@ -727,6 +761,8 @@ function showStatus(msg, color) {
     statusMsg.style.opacity = '1';
   }, 3500);
 }
+
+} // end if (SLUG && btnConfirm)
 
 // ── Confetti Canvas ──────────────────────────────────────────
 
@@ -827,6 +863,6 @@ function showStatus(msg, color) {
 
 app.listen(PORT, () => {
   console.log('🎉 Invitation server running at http://localhost:' + PORT);
-  console.log('   Example: http://localhost:' + PORT + '/invitacion/vickyscotella');
+  console.log('   Example: http://localhost:' + PORT + '/victorias');
   console.log('   Admin:   http://localhost:' + PORT + '/admin/rsvps');
 });

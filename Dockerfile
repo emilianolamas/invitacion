@@ -6,6 +6,7 @@ COPY package.json package-lock.json* ./
 RUN npm install --production
 
 COPY server.js .
+COPY public/ public/
 RUN mkdir -p data
 
 # Mount data/ as a volume for RSVP persistence across restarts:
