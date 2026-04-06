@@ -18,8 +18,29 @@ try {
   console.log('Loaded ' + Object.keys(GUESTS).length + ' guests from data/guests.json');
 } catch (err) {
   console.error('WARNING: Could not load data/guests.json — no guest validation active.');
-  console.error('  Create it with: { "slug": "Nombre" } pairs.');
+  console.error('  Create it with: { "slug": { "name": "Nombre", "gender": "f" } } pairs.');
 }
+
+function getGuestName(slug) {
+  const g = GUESTS[slug];
+  return g ? g.name : null;
+}
+
+function getGuestGender(slug) {
+  const g = GUESTS[slug];
+  if (!g) return 'neutral';
+  if (g.gender === 'm') return 'male';
+  if (g.gender === 'f') return 'female';
+  return 'neutral';
+}
+
+function getInviteWord(gender) {
+  if (gender === 'male') return 'invitado';
+  if (gender === 'female') return 'invitada';
+  return 'invitado/a';
+}
+
+const BASE_URL = 'cumpleañitos.emilianolamas.com';
 
 // ── Security headers ─────────────────────────────────────────
 
@@ -198,33 +219,95 @@ app.get('/admin/rsvps', (req, res) => {
     return res.status(401).send('Unauthorized');
   }
   const rsvps = readRsvps();
-  const entries = Object.entries(rsvps)
-    .map(([slug, data]) => ({ slug, ...data }))
-    .sort((a, b) => (a.slug > b.slug ? 1 : -1));
 
-  const confirmed = entries.filter(e => e.attending);
-  const declined = entries.filter(e => !e.attending);
+  // Build full guest list with status
+  const allGuests = Object.entries(GUESTS).map(([slug, guest]) => {
+    const rsvp = rsvps[slug];
+    const name = guest.name;
+    const gender = guest.gender === 'm' ? 'male' : guest.gender === 'f' ? 'female' : 'neutral';
+    const inviteWord = gender === 'male' ? 'invitado' : gender === 'female' ? 'invitada' : 'invitado/a';
+    const emoji = gender === 'female' ? '💃' : '🕺';
+    const msg = `¡Hola, ${name.split(' ')[0]}! ${emoji}🎉 Estás ${inviteWord} a mi cumpleaños. Revisá los detalles y confirmá tu asistencia acá 👇\nhttps://${BASE_URL}/${slug}`;
+    return {
+      slug,
+      name,
+      status: rsvp ? (rsvp.attending ? 'confirmed' : 'declined') : 'pending',
+      updatedAt: rsvp ? rsvp.updatedAt : null,
+      message: msg,
+    };
+  }).sort((a, b) => a.name.localeCompare(b.name));
+
+  const confirmed = allGuests.filter(g => g.status === 'confirmed');
+  const declined = allGuests.filter(g => g.status === 'declined');
+  const pending = allGuests.filter(g => g.status === 'pending');
+
+  const adminKey = ADMIN_KEY ? '?key=' + encodeURIComponent(req.query.key || '') : '';
 
   res.send(`<!DOCTYPE html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>RSVPs — Cumple de Emiliano</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 600px; margin: 2rem auto; padding: 0 1rem; background: #0f0f0f; color: #e0e0e0; }
-  h1 { font-size: 1.4rem; }
-  h2 { font-size: 1.1rem; margin-top: 2rem; }
-  .count { color: #aaa; font-weight: normal; }
-  ul { list-style: none; padding: 0; }
-  li { padding: .4rem 0; border-bottom: 1px solid #222; }
-  .slug { font-weight: 600; }
-  .date { color: #888; font-size: .85rem; margin-left: .5rem; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; background: #0f0f0f; color: #e0e0e0; }
+  h1 { font-size: 1.5rem; margin-bottom: .5rem; }
+  .summary { color: #888; font-size: .9rem; margin-bottom: 2rem; }
+  h2 { font-size: 1.1rem; margin-top: 2rem; margin-bottom: .75rem; display: flex; align-items: center; gap: .5rem; }
+  .count { color: #aaa; font-weight: normal; font-size: .9rem; }
+  .guest-list { list-style: none; }
+  .guest {
+    display: flex; align-items: center; gap: .5rem;
+    padding: .6rem 0; border-bottom: 1px solid #1a1a1a;
+  }
+  .guest-name { font-weight: 600; flex: 1; min-width: 0; }
+  .guest-date { color: #666; font-size: .75rem; white-space: nowrap; }
+  .guest-slug { color: #555; font-size: .75rem; }
+  .btn-copy {
+    background: #222; border: 1px solid #333; color: #ccc;
+    padding: .3rem .6rem; border-radius: 6px; font-size: .75rem;
+    cursor: pointer; white-space: nowrap; transition: all .2s;
+  }
+  .btn-copy:hover { background: #333; border-color: #555; }
+  .btn-copy.copied { background: #1a3a1a; border-color: #2a5a2a; color: #6bcb77; }
+  .badge {
+    display: inline-block; padding: .15rem .5rem; border-radius: 100px;
+    font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .03em;
+  }
+  .badge-confirmed { background: rgba(107,203,119,0.15); color: #6bcb77; }
+  .badge-declined { background: rgba(231,111,111,0.15); color: #e76f6f; }
+  .badge-pending { background: rgba(255,255,255,0.08); color: #888; }
 </style></head><body>
-<h1>RSVPs</h1>
+<h1>🎂 RSVPs</h1>
+<p class="summary">${confirmed.length} confirmados · ${declined.length} declinaron · ${pending.length} sin respuesta · ${allGuests.length} total</p>
+
 <h2>✅ Confirmados <span class="count">(${confirmed.length})</span></h2>
-<ul>${confirmed.map(e => `<li><span class="slug">${escapeHtml(GUESTS[e.slug] || e.slug)}</span><span class="date">${e.updatedAt}</span></li>`).join('')}</ul>
-<h2>❌ Declinaron <span class="count">(${declined.length})</span></h2>
-<ul>${declined.map(e => `<li><span class="slug">${escapeHtml(GUESTS[e.slug] || e.slug)}</span><span class="date">${e.updatedAt}</span></li>`).join('')}</ul>
+<ul class="guest-list">${confirmed.map(g => guestRow(g)).join('')}</ul>
+
+<h2>⏳ Sin respuesta <span class="count">(${pending.length})</span></h2>
+<ul class="guest-list">${pending.map(g => guestRow(g)).join('')}</ul>
+
+<h2>❌ No van <span class="count">(${declined.length})</span></h2>
+<ul class="guest-list">${declined.map(g => guestRow(g)).join('')}</ul>
+
+<script>
+function copyMsg(btn, slug) {
+  const msg = btn.closest('.guest').dataset.msg;
+  navigator.clipboard.writeText(msg).then(() => {
+    btn.textContent = '✓ Copiado';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = '📋 Copiar'; btn.classList.remove('copied'); }, 2000);
+  });
+}
+</script>
 </body></html>`);
 });
+
+function guestRow(g) {
+  const badgeClass = g.status === 'confirmed' ? 'badge-confirmed' : g.status === 'declined' ? 'badge-declined' : 'badge-pending';
+  const badgeText = g.status === 'confirmed' ? 'Viene' : g.status === 'declined' ? 'No va' : 'Pendiente';
+  const dateStr = g.updatedAt ? new Date(g.updatedAt).toLocaleDateString('es-AR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+  const safeMsg = escapeHtml(g.message).replace(/'/g, '&#39;');
+  return `<li class="guest" data-msg="${safeMsg}"><span class="guest-name">${escapeHtml(g.name)}</span><span class="badge ${badgeClass}">${badgeText}</span>${dateStr ? `<span class="guest-date">${dateStr}</span>` : ''}<button class="btn-copy" onclick="copyMsg(this,'${g.slug}')">📋 Copiar</button></li>`;
+}
 
 function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -235,23 +318,24 @@ function escapeHtml(str) {
 app.get('/:slug', (req, res) => {
   const slug = req.params.slug.replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase();
   if (!slug || !GUESTS[slug]) return res.status(404).send('Not found');
-  res.send(renderPage(slug, GUESTS[slug]));
+  res.send(renderPage(slug, GUESTS[slug].name, getGuestGender(slug)));
 });
 
 // Root — show page without RSVP ability
 app.get('/', (_req, res) => {
-  res.send(renderPage(null, null));
+  res.send(renderPage(null, null, 'neutral'));
 });
 
-function renderPage(slug, guestName) {
+function renderPage(slug, guestName, gender) {
   const isGuest = !!(slug && guestName);
   const safeGuestName = isGuest ? escapeHtml(guestName.split(' ')[0]) : '';
+  const inviteWord = getInviteWord(gender);
   return `<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>¡Estás invitado/a! — Cumple de Emiliano</title>
+<title>¡Estás ${isGuest ? inviteWord : 'invitado/a'}! — Cumple de Emiliano</title>
 <meta name="description" content="Invitación al cumpleaños de Emiliano Lamas — 11 de abril 2026">
 <meta property="og:title" content="Cumple de Emiliano 🎉">
 <meta property="og:description" content="Cenita chill, con música, tragos y juegos de mesa — Sábado 11 de abril, 21 hs">
@@ -599,7 +683,7 @@ canvas#confetti {
   <div class="hero">
     <span class="emoji-top">🎂</span>
     <h1>Cumple de<br>Emiliano</h1>
-    <p class="subtitle">${isGuest ? `¡${safeGuestName}, estás invitado/a!` : '¡Estás invitado/a!'}</p>
+    <p class="subtitle">${isGuest ? `¡${safeGuestName}, estás ${inviteWord}!` : '¡Estás invitado/a!'}</p>
   </div>
 
   <!-- Details card -->

@@ -1,4 +1,4 @@
 {
-  "slug": "Nombre Completo",
-  "otroejemplo": "Otro Nombre"
+  "slug": { "name": "Nombre Completo", "gender": "f" },
+  "otroejemplo": { "name": "Otro Nombre", "gender": "m" }
 }
