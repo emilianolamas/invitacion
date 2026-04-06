@@ -1,0 +1,14 @@
+services:
+  invitacion:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: invitacion
+    restart: unless-stopped
+    ports:
+      - "3847:3847"
+    volumes:
+      - invitacion-data:/app/data
+
+volumes:
+  invitacion-data:
