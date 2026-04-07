@@ -16,5 +16,6 @@ VOLUME ["/app/data"]
 EXPOSE 3847
 
 ENV PORT=3847
+ENV TZ=America/Argentina/Buenos_Aires
 
 CMD ["node", "server.js"]

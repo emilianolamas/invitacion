@@ -119,6 +119,11 @@ function writeRsvps(data) {
   fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
+function writeGuests() {
+  fs.mkdirSync(path.dirname(GUESTS_FILE), { recursive: true });
+  fs.writeFileSync(GUESTS_FILE, JSON.stringify(GUESTS, null, 2));
+}
+
 // ── ICS Generation ───────────────────────────────────────────
 
 function generateICS() {
@@ -214,6 +219,65 @@ app.get('/api/calendar', (_req, res) => {
 });
 
 // Admin: ver RSVPs (protected by ADMIN_KEY env var)
+function adminAuth(req, res, next) {
+  if (ADMIN_KEY && req.query.key !== ADMIN_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+}
+
+// Admin API: add guest
+app.post('/admin/api/add-guest', express.urlencoded({ extended: false, limit: '1kb' }), adminAuth, (req, res) => {
+  const { name, gender } = req.body;
+  if (!name || typeof name !== 'string' || name.trim().length < 2 || name.trim().length > 80) {
+    return res.status(400).json({ error: 'Nombre inválido' });
+  }
+  if (!gender || !['m', 'f'].includes(gender)) {
+    return res.status(400).json({ error: 'Género inválido' });
+  }
+  // Generate slug: lowercase, remove accents, keep alpha + spaces, collapse to single word
+  const slug = name.trim()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+  if (!slug || slug.length < 2) {
+    return res.status(400).json({ error: 'No se pudo generar un slug válido' });
+  }
+  if (GUESTS[slug]) {
+    return res.status(409).json({ error: 'Ya existe un invitado con ese slug: ' + slug });
+  }
+  GUESTS[slug] = { name: name.trim(), gender };
+  writeGuests();
+  console.log('Added guest: ' + slug + ' (' + name.trim() + ')');
+  // Redirect back to admin
+  const key = req.query.key ? '?key=' + encodeURIComponent(req.query.key) : '';
+  res.redirect('/admin/rsvps' + key);
+});
+
+// Admin API: set RSVP status
+app.post('/admin/api/set-rsvp', express.urlencoded({ extended: false, limit: '1kb' }), adminAuth, (req, res) => {
+  const { slug, status } = req.body;
+  const sanitizedSlug = (slug || '').replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase();
+  if (!sanitizedSlug || !GUESTS[sanitizedSlug]) {
+    return res.status(404).json({ error: 'Invitado no encontrado' });
+  }
+  if (!['confirmed', 'declined', 'pending'].includes(status)) {
+    return res.status(400).json({ error: 'Estado inválido' });
+  }
+  const rsvps = readRsvps();
+  if (status === 'pending') {
+    delete rsvps[sanitizedSlug];
+  } else {
+    rsvps[sanitizedSlug] = {
+      attending: status === 'confirmed',
+      updatedAt: new Date().toISOString(),
+    };
+  }
+  writeRsvps(rsvps);
+  const key = req.query.key ? '?key=' + encodeURIComponent(req.query.key) : '';
+  res.redirect('/admin/rsvps' + key);
+});
+
 app.get('/admin/rsvps', (req, res) => {
   if (ADMIN_KEY && req.query.key !== ADMIN_KEY) {
     return res.status(401).send('Unauthorized');
@@ -242,6 +306,7 @@ app.get('/admin/rsvps', (req, res) => {
   const pending = allGuests.filter(g => g.status === 'pending');
 
   const adminKey = ADMIN_KEY ? '?key=' + encodeURIComponent(req.query.key || '') : '';
+  const actionUrl = (endpoint) => '/admin/api/' + endpoint + adminKey;
 
   res.send(`<!DOCTYPE html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -255,19 +320,25 @@ app.get('/admin/rsvps', (req, res) => {
   .count { color: #aaa; font-weight: normal; font-size: .9rem; }
   .guest-list { list-style: none; }
   .guest {
-    display: flex; align-items: center; gap: .5rem;
+    display: flex; align-items: center; gap: .4rem;
     padding: .6rem 0; border-bottom: 1px solid #1a1a1a;
+    flex-wrap: wrap;
   }
-  .guest-name { font-weight: 600; flex: 1; min-width: 0; }
+  .guest-name { font-weight: 600; flex: 1; min-width: 120px; }
   .guest-date { color: #666; font-size: .75rem; white-space: nowrap; }
-  .guest-slug { color: #555; font-size: .75rem; }
-  .btn-copy {
+  .btn-copy, .btn-action {
     background: #222; border: 1px solid #333; color: #ccc;
-    padding: .3rem .6rem; border-radius: 6px; font-size: .75rem;
+    padding: .3rem .6rem; border-radius: 6px; font-size: .7rem;
     cursor: pointer; white-space: nowrap; transition: all .2s;
   }
-  .btn-copy:hover { background: #333; border-color: #555; }
+  .btn-copy:hover, .btn-action:hover { background: #333; border-color: #555; }
   .btn-copy.copied { background: #1a3a1a; border-color: #2a5a2a; color: #6bcb77; }
+  .btn-action.green { border-color: #2a5a2a; color: #6bcb77; }
+  .btn-action.green:hover { background: #1a3a1a; }
+  .btn-action.red { border-color: #5a2a2a; color: #e76f6f; }
+  .btn-action.red:hover { background: #3a1a1a; }
+  .btn-action.gray { border-color: #444; color: #888; }
+  .btn-action.gray:hover { background: #2a2a2a; }
   .badge {
     display: inline-block; padding: .15rem .5rem; border-radius: 100px;
     font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .03em;
@@ -275,18 +346,55 @@ app.get('/admin/rsvps', (req, res) => {
   .badge-confirmed { background: rgba(107,203,119,0.15); color: #6bcb77; }
   .badge-declined { background: rgba(231,111,111,0.15); color: #e76f6f; }
   .badge-pending { background: rgba(255,255,255,0.08); color: #888; }
+  .actions-row { display: flex; gap: .3rem; align-items: center; }
+  /* Add guest form */
+  .add-form {
+    margin-top: 2.5rem; padding: 1.2rem; border-radius: 12px;
+    background: rgba(255,255,255,0.03); border: 1px solid #222;
+  }
+  .add-form h2 { margin-top: 0; }
+  .form-row { display: flex; gap: .5rem; margin-top: .75rem; flex-wrap: wrap; }
+  .form-row input, .form-row select {
+    background: #1a1a1a; border: 1px solid #333; color: #e0e0e0;
+    padding: .5rem .75rem; border-radius: 8px; font-size: .9rem;
+    outline: none;
+  }
+  .form-row input:focus, .form-row select:focus { border-color: #555; }
+  .form-row input { flex: 1; min-width: 150px; }
+  .form-row select { width: auto; }
+  .btn-submit {
+    background: #f4a261; color: #0f0f0f; border: none;
+    padding: .5rem 1rem; border-radius: 8px; font-size: .85rem;
+    font-weight: 600; cursor: pointer; transition: background .2s;
+  }
+  .btn-submit:hover { background: #e76f51; }
 </style></head><body>
 <h1>🎂 RSVPs</h1>
 <p class="summary">${confirmed.length} confirmados · ${declined.length} declinaron · ${pending.length} sin respuesta · ${allGuests.length} total</p>
 
 <h2>✅ Confirmados <span class="count">(${confirmed.length})</span></h2>
-<ul class="guest-list">${confirmed.map(g => guestRow(g)).join('')}</ul>
+<ul class="guest-list">${confirmed.map(g => guestRow(g, actionUrl)).join('')}</ul>
 
 <h2>⏳ Sin respuesta <span class="count">(${pending.length})</span></h2>
-<ul class="guest-list">${pending.map(g => guestRow(g)).join('')}</ul>
+<ul class="guest-list">${pending.map(g => guestRow(g, actionUrl)).join('')}</ul>
 
 <h2>❌ No van <span class="count">(${declined.length})</span></h2>
-<ul class="guest-list">${declined.map(g => guestRow(g)).join('')}</ul>
+<ul class="guest-list">${declined.map(g => guestRow(g, actionUrl)).join('')}</ul>
+
+<div class="add-form">
+  <h2>➕ Agregar invitado</h2>
+  <form method="POST" action="${actionUrl('add-guest')}">
+    <div class="form-row">
+      <input type="text" name="name" placeholder="Nombre completo" required minlength="2" maxlength="80" autocomplete="off">
+      <select name="gender" required>
+        <option value="" disabled selected>Género</option>
+        <option value="f">Mujer</option>
+        <option value="m">Hombre</option>
+      </select>
+      <button type="submit" class="btn-submit">Agregar</button>
+    </div>
+  </form>
+</div>
 
 <script>
 function copyMsg(btn, slug) {
@@ -297,16 +405,33 @@ function copyMsg(btn, slug) {
     setTimeout(() => { btn.textContent = '📋 Copiar'; btn.classList.remove('copied'); }, 2000);
   });
 }
+
+function setRsvp(slug, status) {
+  const form = document.createElement('form');
+  form.method = 'POST';
+  form.action = '${actionUrl('set-rsvp')}';
+  form.innerHTML = '<input type="hidden" name="slug" value="' + slug + '"><input type="hidden" name="status" value="' + status + '">';
+  document.body.appendChild(form);
+  form.submit();
+}
 </script>
 </body></html>`);
 });
 
-function guestRow(g) {
+function guestRow(g, actionUrl) {
   const badgeClass = g.status === 'confirmed' ? 'badge-confirmed' : g.status === 'declined' ? 'badge-declined' : 'badge-pending';
   const badgeText = g.status === 'confirmed' ? 'Viene' : g.status === 'declined' ? 'No va' : 'Pendiente';
-  const dateStr = g.updatedAt ? new Date(g.updatedAt).toLocaleDateString('es-AR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+  const dateStr = g.updatedAt ? new Date(g.updatedAt).toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
   const safeMsg = escapeHtml(g.message).replace(/'/g, '&#39;');
-  return `<li class="guest" data-msg="${safeMsg}"><span class="guest-name">${escapeHtml(g.name)}</span><span class="badge ${badgeClass}">${badgeText}</span>${dateStr ? `<span class="guest-date">${dateStr}</span>` : ''}<button class="btn-copy" onclick="copyMsg(this,'${g.slug}')">📋 Copiar</button></li>`;
+  const slug = g.slug;
+
+  // Show action buttons based on current status
+  let actions = '';
+  if (g.status !== 'confirmed') actions += `<button class="btn-action green" onclick="setRsvp('${slug}','confirmed')" title="Marcar como viene">✅</button>`;
+  if (g.status !== 'declined') actions += `<button class="btn-action red" onclick="setRsvp('${slug}','declined')" title="Marcar como no va">❌</button>`;
+  if (g.status !== 'pending') actions += `<button class="btn-action gray" onclick="setRsvp('${slug}','pending')" title="Volver a pendiente">↩️</button>`;
+
+  return `<li class="guest" data-msg="${safeMsg}"><span class="guest-name">${escapeHtml(g.name)}</span><span class="badge ${badgeClass}">${badgeText}</span>${dateStr ? `<span class="guest-date">${dateStr}</span>` : ''}<div class="actions-row">${actions}<button class="btn-copy" onclick="copyMsg(this,'${slug}')">📋 Copiar</button></div></li>`;
 }
 
 function escapeHtml(str) {

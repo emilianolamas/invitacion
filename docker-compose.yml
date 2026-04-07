@@ -8,6 +8,7 @@ services:
     ports:
       - "3847:3847"
     environment:
+      - TZ=America/Argentina/Buenos_Aires
       - ADMIN_KEY=${ADMIN_KEY:-cachito2019$}
     volumes:
       - invitacion-data:/app/data
